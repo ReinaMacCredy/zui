@@ -8,11 +8,13 @@ use crate::{
     AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla, Pixels,
     Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
 };
+use scheduler::Instant;
 use std::{
     fmt::Debug,
     iter::Peekable,
     ops::{Add, Range, Sub},
     slice,
+    time::Duration,
 };
 
 #[allow(non_camel_case_types, unused)]
@@ -21,6 +23,42 @@ pub type PathVertex_ScaledPixels = PathVertex<ScaledPixels>;
 
 #[expect(missing_docs)]
 pub type DrawOrder = u32;
+
+/// A periodic opacity animation for one painted quad. The window re-evaluates
+/// it each time it presents and re-presents the finished frame every
+/// `interval`, so the quad animates without any view rendering again.
+#[derive(Clone, Copy, Debug)]
+pub struct QuadAnimation {
+    /// Shared start time; quads with the same epoch and period stay in phase.
+    pub epoch: Instant,
+    /// Length of one cycle.
+    pub period: Duration,
+    /// Added to the cycle position (0..1) before `curve` is evaluated.
+    pub phase_offset: f32,
+    /// Maps a cycle position to 0..1 between `from` and `to`.
+    pub curve: fn(f32) -> f32,
+    /// Opacity multiplier where `curve` is 0.
+    pub from: f32,
+    /// Opacity multiplier where `curve` is 1.
+    pub to: f32,
+    /// How often the window re-presents while this quad is on screen.
+    pub interval: Duration,
+}
+
+impl QuadAnimation {
+    fn opacity_at(&self, now: Instant) -> f32 {
+        let elapsed = now.saturating_duration_since(self.epoch).as_secs_f32();
+        let cycle = (elapsed / self.period.as_secs_f32().max(f32::EPSILON)).fract();
+        self.from + (self.to - self.from) * (self.curve)(cycle + self.phase_offset)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AnimatedQuad {
+    index: usize,
+    background: Background,
+    animation: QuadAnimation,
+}
 
 /// A boolean stored as a `u32` so that GPU-facing structs contain no
 /// compiler-inserted padding bytes, which would be undefined behavior to
@@ -54,6 +92,7 @@ pub struct Scene {
     /// stream: the renderer breaks its render pass at each blur's order to
     /// snapshot the framebuffer (macOS Metal, Windows DirectX, and wGPU).
     pub backdrop_blurs: Vec<BackdropBlur>,
+    animated_quads: Vec<AnimatedQuad>,
 }
 
 #[expect(missing_docs)]
@@ -71,6 +110,7 @@ impl Scene {
         self.polychrome_sprites.clear();
         self.surfaces.clear();
         self.backdrop_blurs.clear();
+        self.animated_quads.clear();
     }
 
     /// Whether there are no drawable operations, ignoring empty layer markers.
@@ -109,6 +149,46 @@ impl Scene {
         self.backdrop_blurs.push(blur);
         self.paint_operations
             .push(PaintOperation::BackdropBlur(blur));
+    }
+
+    pub fn insert_animated_quad(&mut self, quad: Quad, animation: QuadAnimation) {
+        let before = self.quads.len();
+        self.insert_primitive(quad);
+        if self.quads.len() == before {
+            return;
+        }
+        if let Some(PaintOperation::Primitive(Primitive::Quad(quad))) = self.paint_operations.pop()
+        {
+            self.paint_operations
+                .push(PaintOperation::AnimatedQuad(quad, animation));
+        }
+        self.animated_quads.push(AnimatedQuad {
+            index: before,
+            background: quad.background,
+            animation,
+        });
+    }
+
+    /// Whether any quad in this scene carries a [`QuadAnimation`].
+    pub fn has_animations(&self) -> bool {
+        !self.animated_quads.is_empty()
+    }
+
+    /// The shortest re-present interval among the animated quads.
+    pub fn animation_interval(&self) -> Option<Duration> {
+        self.animated_quads
+            .iter()
+            .map(|quad| quad.animation.interval)
+            .min()
+    }
+
+    /// Re-evaluate every animated quad's opacity at `now`, in place.
+    pub fn animate(&mut self, now: Instant) {
+        for animated in &self.animated_quads {
+            self.quads[animated.index].background = animated
+                .background
+                .opacity(animated.animation.opacity_at(now));
+        }
     }
 
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
@@ -169,6 +249,9 @@ impl Scene {
         for operation in &prev_scene.paint_operations[range] {
             match operation {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
+                PaintOperation::AnimatedQuad(quad, animation) => {
+                    self.insert_animated_quad(*quad, *animation)
+                }
                 PaintOperation::BackdropBlur(blur) => self.insert_backdrop_blur(*blur),
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
@@ -178,7 +261,20 @@ impl Scene {
 
     pub fn finish(&mut self) {
         self.shadows.sort_by_key(|shadow| shadow.order);
-        self.quads.sort_by_key(|quad| quad.order);
+        if self.animated_quads.is_empty() {
+            self.quads.sort_by_key(|quad| quad.order);
+        } else {
+            let mut sorted: Vec<usize> = (0..self.quads.len()).collect();
+            sorted.sort_by_key(|&index| self.quads[index].order);
+            let mut moved_to = vec![0; sorted.len()];
+            for (new, &old) in sorted.iter().enumerate() {
+                moved_to[old] = new;
+            }
+            self.quads = sorted.iter().map(|&index| self.quads[index]).collect();
+            for animated in &mut self.animated_quads {
+                animated.index = moved_to[animated.index];
+            }
+        }
         self.paths.sort_by_key(|path| path.order);
         self.underlines.sort_by_key(|underline| underline.order);
         self.monochrome_sprites
@@ -243,6 +339,7 @@ pub(crate) enum PrimitiveKind {
 
 pub(crate) enum PaintOperation {
     Primitive(Primitive),
+    AnimatedQuad(Quad, QuadAnimation),
     BackdropBlur(BackdropBlur),
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
@@ -1171,6 +1268,69 @@ mod tests {
             inset: 0,
             pad: 0,
         }
+    }
+
+    fn quad_at(x: f32, color: Hsla) -> Quad {
+        let bounds = Bounds::new(
+            point(ScaledPixels(x), ScaledPixels(0.)),
+            crate::size(ScaledPixels(10.), ScaledPixels(10.)),
+        );
+        Quad {
+            bounds,
+            content_mask: ContentMask {
+                bounds: self::bounds(),
+            },
+            background: color.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn animated_quad_follows_its_quad_through_sorting_and_replay() {
+        fn half(_: f32) -> f32 {
+            0.5
+        }
+        let animation = QuadAnimation {
+            epoch: Instant::now(),
+            period: Duration::from_secs(1),
+            phase_offset: 0.,
+            curve: half,
+            from: 0.,
+            to: 1.,
+            interval: Duration::from_millis(33),
+        };
+        let red = crate::red();
+        let blue = crate::blue();
+        let paint = |scene: &mut Scene| {
+            scene.insert_primitive(quad_at(0., red));
+            scene.insert_primitive(quad_at(5., red));
+            scene.insert_animated_quad(quad_at(50., blue), animation);
+        };
+        let mut first = Scene::default();
+        paint(&mut first);
+        let mut replayed = Scene::default();
+        replayed.replay(0..first.len(), &first);
+        for scene in [&mut first, &mut replayed] {
+            scene.finish();
+            assert!(scene.has_animations());
+            assert_eq!(scene.animation_interval(), Some(Duration::from_millis(33)));
+            scene.animate(Instant::now());
+            let animated = scene
+                .quads
+                .iter()
+                .find(|quad| quad.bounds.origin.x == ScaledPixels(50.))
+                .unwrap();
+            assert_eq!(animated.background, Background::from(blue).opacity(0.5));
+            assert!(
+                scene
+                    .quads
+                    .iter()
+                    .filter(|quad| quad.bounds.origin.x != ScaledPixels(50.))
+                    .all(|quad| quad.background == Background::from(red))
+            );
+        }
+        first.clear();
+        assert!(!first.has_animations());
     }
 
     // Matches Window::paint_backdrop_blur, including its invisible splitter.

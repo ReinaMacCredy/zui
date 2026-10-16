@@ -1112,6 +1112,7 @@ pub struct Window {
     active: Rc<Cell<bool>>,
     hovered: Rc<Cell<bool>>,
     pub(crate) needs_present: Rc<Cell<bool>>,
+    last_animation_present: Option<Instant>,
     /// Tracks recent input event timestamps to determine if input is arriving at a high rate.
     /// Used to selectively enable VRR optimization only when input rate exceeds 60fps.
     pub(crate) input_rate_tracker: Rc<RefCell<InputRateTracker>>,
@@ -1601,8 +1602,12 @@ impl Window {
                 // Keep presenting if input was recently arriving at a high rate (>= 60fps).
                 // Once high-rate input is detected, we sustain presentation for 1 second
                 // to prevent display underclocking during active input.
+                let animation_due = handle
+                    .update(&mut cx, |_, window, _| window.animation_present_due(now))
+                    .unwrap_or(false);
                 let needs_present = request_frame_options.require_presentation
                     || needs_present.get()
+                    || animation_due
                     || (active.get() && input_rate_tracker.borrow_mut().is_high_rate());
 
                 if invalidator.is_dirty() || request_frame_options.force_render {
@@ -1631,6 +1636,7 @@ impl Window {
                         window.complete_frame();
                         if !window.invalidator.is_dirty()
                             && !window.needs_present.get()
+                            && !window.rendered_frame.scene.has_animations()
                             && window.next_frame_callbacks.borrow().is_empty()
                             && !(window.active.get()
                                 && window.input_rate_tracker.borrow().is_high_rate())
@@ -1833,6 +1839,7 @@ impl Window {
             active,
             hovered,
             needs_present,
+            last_animation_present: None,
             input_rate_tracker,
             #[cfg(feature = "input-latency-histogram")]
             input_latency_tracker: InputLatencyTracker::new()?,
@@ -2934,10 +2941,25 @@ impl Window {
             .push(Rc::new(callback));
     }
 
+    fn animation_present_due(&self, now: Instant) -> bool {
+        self.rendered_frame
+            .scene
+            .animation_interval()
+            .is_some_and(|interval| {
+                self.last_animation_present
+                    .is_none_or(|last| now.saturating_duration_since(last) >= interval)
+            })
+    }
+
     #[profiling::function]
     fn present(&mut self) {
         for callback in &self.rendered_frame.presentation_callbacks {
             callback();
+        }
+        if self.rendered_frame.scene.has_animations() {
+            let now = Instant::now();
+            self.rendered_frame.scene.animate(now);
+            self.last_animation_present = Some(now);
         }
         self.platform_window.draw_layered(
             &self.rendered_frame.scene,
@@ -3659,8 +3681,8 @@ impl Window {
                 .min(((fade.bounds.bottom().0 - center.y.0) / fade.bottom_band()).clamp(0.0, 1.0));
         }
         if fade.left {
-            ramp = ramp
-                .min(((center.x.0 - fade.bounds.left().0) / fade.left_band()).clamp(0.0, 1.0));
+            ramp =
+                ramp.min(((center.x.0 - fade.bounds.left().0) / fade.left_band()).clamp(0.0, 1.0));
         }
         if fade.right {
             ramp = ramp
@@ -4154,6 +4176,28 @@ impl Window {
             content_mask,
             corner_radii: corner_radii.scale(scale_factor),
         });
+    }
+
+    /// Paint a filled quad whose opacity follows `animation` on every present,
+    /// without this element or its view rendering again. Borders are ignored.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_animated_quad(&mut self, quad: PaintQuad, animation: crate::QuadAnimation) {
+        self.invalidator.debug_assert_paint();
+
+        let opacity = self.element_opacity();
+        let quad = Quad {
+            order: 0,
+            bounds: self.snap_bounds(quad.bounds),
+            content_mask: self.snapped_content_mask(),
+            background: quad.background.opacity(opacity),
+            border_color: Hsla::transparent_black(),
+            corner_radii: quad.corner_radii.scale(self.scale_factor()),
+            border_widths: Edges::default(),
+            border_style: quad.border_style,
+            fade: self.scaled_edge_fade(),
+        };
+        self.next_frame.scene.insert_animated_quad(quad, animation);
     }
 
     /// Paint one or more quads into the scene for the next frame at the current stacking context.
