@@ -93,6 +93,7 @@ pub struct Scene {
     /// snapshot the framebuffer (macOS Metal, Windows DirectX, and wGPU).
     pub backdrop_blurs: Vec<BackdropBlur>,
     animated_quads: Vec<AnimatedQuad>,
+    animated_at: Option<Instant>,
 }
 
 #[expect(missing_docs)]
@@ -111,6 +112,7 @@ impl Scene {
         self.surfaces.clear();
         self.backdrop_blurs.clear();
         self.animated_quads.clear();
+        self.animated_at = None;
     }
 
     /// Whether there are no drawable operations, ignoring empty layer markers.
@@ -184,6 +186,7 @@ impl Scene {
 
     /// Re-evaluate every animated quad's opacity at `now`, in place.
     pub fn animate(&mut self, now: Instant) {
+        self.animated_at = Some(now);
         for animated in &self.animated_quads {
             self.quads[animated.index].background = animated
                 .background
@@ -246,6 +249,9 @@ impl Scene {
     }
 
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
+        // macOS splits a presented scene by replay for its overlay layer; carry
+        // the presented time so `finish` restores the animated opacities.
+        self.animated_at = self.animated_at.max(prev_scene.animated_at);
         for operation in &prev_scene.paint_operations[range] {
             match operation {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
@@ -285,6 +291,9 @@ impl Scene {
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
         self.surfaces.sort_by_key(|surface| surface.order);
         self.backdrop_blurs.sort_by_key(|blur| blur.order);
+        if let Some(now) = self.animated_at {
+            self.animate(now);
+        }
     }
 
     #[cfg_attr(
@@ -1329,6 +1338,15 @@ mod tests {
                     .all(|quad| quad.background == Background::from(red))
             );
         }
+        let mut split = Scene::default();
+        split.replay(0..first.len(), &first);
+        split.finish();
+        let animated = split
+            .quads
+            .iter()
+            .find(|quad| quad.bounds.origin.x == ScaledPixels(50.))
+            .unwrap();
+        assert_eq!(animated.background, Background::from(blue).opacity(0.5));
         first.clear();
         assert!(!first.has_animations());
     }
