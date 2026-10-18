@@ -106,6 +106,10 @@ impl A11yDebug {
             ephemeral.insert(*id, ephemeral_id(index));
         }
 
+        let scale_factor = self
+            .last_frame
+            .as_ref()
+            .map_or(1.0, |frame| frame.scale_factor as f64);
         let mut nodes = serde_json::Map::new();
         for (id, node) in &update.nodes {
             let key = ephemeral
@@ -127,7 +131,14 @@ impl A11yDebug {
                 .unwrap_or_default();
             #[cfg(not(debug_assertions))]
             let provenance = NodeProvenance::default();
-            let value = node_to_json(*id, node, &ephemeral, &provenance);
+            let value = node_to_json(
+                *id,
+                node,
+                &ephemeral,
+                &provenance,
+                scale_factor,
+                self.last_gpui_focus == Some(*id),
+            );
             nodes.insert(key, value);
         }
 
@@ -176,11 +187,28 @@ fn node_to_json(
     node: &accesskit::Node,
     ephemeral: &FxHashMap<NodeId, String>,
     provenance: &NodeProvenance,
+    scale_factor: f64,
+    focused: bool,
 ) -> serde_json::Value {
     use serde_json::json;
 
     let mut map = serde_json::Map::new();
     map.insert("accesskit_id".into(), json!(id.0.to_string()));
+    if focused {
+        map.insert("focused".into(), json!(true));
+    }
+    if let Some(rect) = node.bounds() {
+        let logical = |device: f64| (device / scale_factor * 10.0).round() / 10.0;
+        map.insert(
+            "bounds".into(),
+            json!({
+                "x": logical(rect.x0),
+                "y": logical(rect.y0),
+                "w": logical(rect.width()),
+                "h": logical(rect.height()),
+            }),
+        );
+    }
 
     let children: Vec<String> = node
         .children()
