@@ -6261,9 +6261,42 @@ impl Window {
         self.a11y.is_active()
     }
 
+    /// Build the accessibility tree every frame even when no assistive technology is connected.
+    pub fn set_a11y_forced(&mut self, forced: bool) {
+        if self.a11y.forced != forced {
+            self.a11y.forced = forced;
+            self.refresh();
+        }
+    }
+
+    /// Returns whether the accessibility tree is forced on by [`Self::set_a11y_forced`].
+    pub fn is_a11y_forced(&self) -> bool {
+        self.a11y.forced
+    }
+
     /// Debug representation of the last frame's accessibility information.
     pub fn debug_a11y_tree_json(&self) -> Option<String> {
         self.a11y.debug_tree_json()
+    }
+
+    /// Perform an accessibility action on a node as if assistive technology had requested it.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn perform_a11y_action(
+        &mut self,
+        node_id: accesskit::NodeId,
+        action: accesskit::Action,
+        data: Option<accesskit::ActionData>,
+        cx: &mut App,
+    ) {
+        self.handle_a11y_action(
+            accesskit::ActionRequest {
+                action,
+                target_tree: accesskit::TreeId::ROOT,
+                target_node: node_id,
+                data,
+            },
+            cx,
+        );
     }
 
     /// Register a listener for an accessibility action on a specific node.
