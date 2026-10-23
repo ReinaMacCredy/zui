@@ -320,7 +320,7 @@ impl Element for Img {
                                 state.frame_index = state.frame_index.min(max_frame_index);
                                 if frame_count > 1 && !cx.reduce_motion() {
                                     if window.is_window_active() {
-                                        let current_time = Instant::now();
+                                        let current_time = crate::motion_clock::now();
                                         if let Some(last_frame_time) = state.last_frame_time {
                                             let elapsed = current_time - last_frame_time;
                                             let frame_duration =

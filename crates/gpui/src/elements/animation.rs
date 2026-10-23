@@ -154,8 +154,9 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
         cx: &mut App,
     ) -> (crate::LayoutId, Self::RequestLayoutState) {
         window.with_element_state(global_id.unwrap(), |state, window| {
+            let now = crate::motion_clock::now();
             let mut state = state.unwrap_or_else(|| AnimationState {
-                start: Instant::now(),
+                start: now,
                 animation_ix: 0,
             });
             let (animation_ix, delta, done) = if cx.reduce_motion() {
@@ -169,7 +170,7 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
             } else {
                 let animation_ix = state.animation_ix;
 
-                let mut delta = state.start.elapsed().as_secs_f32()
+                let mut delta = now.saturating_duration_since(state.start).as_secs_f32()
                     / self.animations[animation_ix].duration.as_secs_f32();
 
                 let mut done = false;
@@ -178,7 +179,7 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
                         if animation_ix >= self.animations.len() - 1 {
                             done = true;
                         } else {
-                            state.start = Instant::now();
+                            state.start = now;
                             state.animation_ix += 1;
                         }
                         delta = 1.0;
@@ -198,7 +199,7 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
             let element = self.element.take().expect("should only be called once");
             let mut element = (self.animator)(element, animation_ix, delta).into_any_element();
 
-            if !done {
+            if !done && crate::motion_clock::paused().is_none() {
                 window.request_animation_frame();
             }
 
