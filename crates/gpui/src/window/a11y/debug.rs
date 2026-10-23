@@ -2,8 +2,8 @@
 //!
 //! [`A11yDebug`] retains the last [`TreeUpdate`] sent to the platform adapter so
 //! it can be serialized on demand (see
-//! [`crate::Window::debug_a11y_tree_json`]). In `cfg(debug_assertions)` builds,
-//! we capture extra info.
+//! [`crate::Window::debug_a11y_tree_json`]). In debug builds, and in release
+//! builds while the tree is forced, we capture each node's provenance.
 
 use accesskit::{Action, NodeId, TreeUpdate};
 use collections::FxHashMap;
@@ -27,7 +27,6 @@ struct CapturedFrame {
     scale_factor: f32,
 }
 
-#[cfg(debug_assertions)]
 #[derive(Clone, Default)]
 pub(crate) struct NodeDebugInfo {
     /// Whether the node was synthesized via
@@ -45,7 +44,6 @@ pub(crate) struct NodeDebugInfo {
     pub source_location: Option<&'static core::panic::Location<'static>>,
 }
 
-#[cfg(debug_assertions)]
 #[derive(Clone, Default)]
 pub(crate) struct NodeCreator {
     pub view: Option<&'static str>,
@@ -63,7 +61,6 @@ pub(crate) struct A11yDebug {
     frame_number: u64,
     /// Metadata about the most recently captured frame.
     last_frame: Option<CapturedFrame>,
-    #[cfg(debug_assertions)]
     last_node_info: FxHashMap<NodeId, NodeDebugInfo>,
 }
 
@@ -91,9 +88,8 @@ impl A11yDebug {
         });
     }
 
-    #[cfg(debug_assertions)]
     pub(crate) fn capture_node_info(&mut self, node_info: &FxHashMap<NodeId, NodeDebugInfo>) {
-        self.last_node_info = node_info.clone();
+        self.last_node_info.clone_from(node_info);
     }
 
     /// Serialize the last tree update to a readable JSON string. Node ids are
@@ -116,7 +112,6 @@ impl A11yDebug {
                 .get(id)
                 .cloned()
                 .unwrap_or_else(|| id.0.to_string());
-            #[cfg(debug_assertions)]
             let provenance = self
                 .last_node_info
                 .get(id)
@@ -129,8 +124,6 @@ impl A11yDebug {
                     synthetic: info.synthetic.then_some(true),
                 })
                 .unwrap_or_default();
-            #[cfg(not(debug_assertions))]
-            let provenance = NodeProvenance::default();
             let value = node_to_json(
                 *id,
                 node,
@@ -224,7 +217,7 @@ fn node_to_json(
         map.insert("children".into(), json!(children));
     }
 
-    // Provenance (debug builds only), ordered before the accessibility section.
+    // Provenance, ordered before the accessibility section.
     if let Some(element_id) = provenance.element_id {
         map.insert("element_id".into(), json!(element_id));
     }

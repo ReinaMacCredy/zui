@@ -95,8 +95,7 @@ impl<T: 'static> DragMoveEvent<T> {
 }
 
 impl Interactivity {
-    /// Create an `Interactivity`, capturing the caller location in debug mode.
-    #[cfg(any(feature = "inspector", debug_assertions))]
+    /// Create an `Interactivity`, capturing the caller location.
     #[track_caller]
     pub fn new() -> Interactivity {
         Interactivity {
@@ -105,23 +104,9 @@ impl Interactivity {
         }
     }
 
-    /// Create an `Interactivity`, capturing the caller location in debug mode.
-    #[cfg(not(any(feature = "inspector", debug_assertions)))]
-    pub fn new() -> Interactivity {
-        Interactivity::default()
-    }
-
-    /// Gets the source location of construction. Returns `None` when not in debug mode.
+    /// Gets the source location of construction.
     pub fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        #[cfg(any(feature = "inspector", debug_assertions))]
-        {
-            self.source_location
-        }
-
-        #[cfg(not(any(feature = "inspector", debug_assertions)))]
-        {
-            None
-        }
+        self.source_location
     }
 
     /// Bind the given callback to the mouse down event for the given mouse button, during the bubble phase.
@@ -2027,7 +2012,6 @@ pub struct Interactivity {
     pub(crate) override_role: Option<accesskit::Role>,
     pub(crate) aria: AriaProperties,
 
-    #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) source_location: Option<&'static core::panic::Location<'static>>,
 
     #[cfg(any(test, feature = "test-support"))]

@@ -160,7 +160,6 @@ pub(crate) struct A11y {
     /// so it can be dumped via [`crate::Window::debug_a11y_tree_json`].
     debug: debug::A11yDebug,
     /// Maps a view's [`EntityId`] to its `Render` type name
-    #[cfg(debug_assertions)]
     pub(crate) view_type_names: FxHashMap<EntityId, &'static str>,
 }
 
@@ -182,7 +181,6 @@ impl A11y {
             window_title,
             last_focus_without_node: None,
             debug: debug::A11yDebug::default(),
-            #[cfg(debug_assertions)]
             view_type_names: FxHashMap::default(),
         }
     }
@@ -218,6 +216,10 @@ impl A11y {
 
     pub(crate) fn is_active(&self) -> bool {
         self.active_this_frame
+    }
+
+    pub(crate) fn records_provenance(&self) -> bool {
+        cfg!(debug_assertions) || self.forced
     }
 
     pub(crate) fn set_focusable(&mut self, node_id: NodeId, focus_id: FocusId) {
@@ -288,7 +290,6 @@ impl A11y {
             self.window_title.as_ref(),
             frame,
         );
-        #[cfg(debug_assertions)]
         self.debug.capture_node_info(&self.nodes.node_info);
         update
     }
@@ -305,8 +306,7 @@ pub struct A11ySubtreeBuilder<'a> {
     nodes: &'a mut A11yNodeBuilder,
     /// Provenance of the real element whose `a11y_synthetic_children` is
     /// running.
-    #[cfg(debug_assertions)]
-    creator: debug::NodeCreator,
+    creator: Option<debug::NodeCreator>,
 }
 
 impl<'a> A11ySubtreeBuilder<'a> {
@@ -314,14 +314,12 @@ impl<'a> A11ySubtreeBuilder<'a> {
         Self {
             parent_id,
             nodes,
-            #[cfg(debug_assertions)]
-            creator: debug::NodeCreator::default(),
+            creator: None,
         }
     }
 
-    #[cfg(debug_assertions)]
     pub(crate) fn with_creator(mut self, creator: debug::NodeCreator) -> Self {
-        self.creator = creator;
+        self.creator = Some(creator);
         self
     }
 
@@ -344,15 +342,14 @@ impl<'a> A11ySubtreeBuilder<'a> {
     /// in which case the node is discarded.
     pub fn push_child(&mut self, id: NodeId, node: accesskit::Node) -> bool {
         let pushed = self.nodes.push_leaf(id, node);
-        #[cfg(debug_assertions)]
-        if pushed {
+        if pushed && let Some(creator) = &self.creator {
             self.nodes.record_node_info(
                 id,
                 debug::NodeDebugInfo {
                     synthetic: true,
-                    view: self.creator.view,
-                    element_id: self.creator.element_id.clone(),
-                    source_location: self.creator.source_location,
+                    view: creator.view,
+                    element_id: creator.element_id.clone(),
+                    source_location: creator.source_location,
                 },
             );
         }
@@ -382,7 +379,6 @@ pub(crate) struct A11yNodeBuilder {
     /// pattern, which allows a focused container to act as if a descendant is
     /// focused.
     active_descendant: Option<NodeId>,
-    #[cfg(debug_assertions)]
     node_info: FxHashMap<NodeId, debug::NodeDebugInfo>,
 }
 
@@ -395,13 +391,11 @@ impl A11yNodeBuilder {
             seen_ids: FxHashSet::default(),
             focus: None,
             active_descendant: None,
-            #[cfg(debug_assertions)]
             node_info: FxHashMap::default(),
         }
     }
 
-    /// Records provenance for a node already pushed this frame. Debug builds only.
-    #[cfg(debug_assertions)]
+    /// Records provenance for a node already pushed this frame.
     pub(crate) fn record_node_info(&mut self, id: NodeId, info: debug::NodeDebugInfo) {
         self.node_info.insert(id, info);
     }
@@ -475,7 +469,6 @@ impl A11yNodeBuilder {
         self.ids_stack.clear();
         self.nodes_stack.clear();
         self.seen_ids.clear();
-        #[cfg(debug_assertions)]
         self.node_info.clear();
         let mut root_node = accesskit::Node::new(accesskit::Role::Window);
         if let Some(title) = window_title {
