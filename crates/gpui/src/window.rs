@@ -1603,7 +1603,9 @@ impl Window {
                 // Once high-rate input is detected, we sustain presentation for 1 second
                 // to prevent display underclocking during active input.
                 let animation_due = handle
-                    .update(&mut cx, |_, window, _| window.animation_present_due(now))
+                    .update(&mut cx, |_, window, _| {
+                        window.animation_present_due(crate::motion_clock::now())
+                    })
                     .unwrap_or(false);
                 let needs_present = request_frame_options.require_presentation
                     || needs_present.get()
@@ -2957,7 +2959,7 @@ impl Window {
             callback();
         }
         if self.rendered_frame.scene.has_animations() {
-            let now = Instant::now();
+            let now = crate::motion_clock::now();
             self.rendered_frame.scene.animate(now);
             self.last_animation_present = Some(now);
         }
