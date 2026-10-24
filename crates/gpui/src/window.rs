@@ -3659,8 +3659,8 @@ impl Window {
                 .min(((fade.bounds.bottom().0 - center.y.0) / fade.bottom_band()).clamp(0.0, 1.0));
         }
         if fade.left {
-            ramp = ramp
-                .min(((center.x.0 - fade.bounds.left().0) / fade.left_band()).clamp(0.0, 1.0));
+            ramp =
+                ramp.min(((center.x.0 - fade.bounds.left().0) / fade.left_band()).clamp(0.0, 1.0));
         }
         if fade.right {
             ramp = ramp
@@ -4836,6 +4836,71 @@ impl Window {
         }
 
         Ok(())
+    }
+
+    /// Overwrites a region of an image already painted with
+    /// [`Self::paint_image`], so a producer that tracks damage uploads only what
+    /// changed; a [`RenderImage::blank`] image gets its tile from
+    /// [`Self::insert_blank_image`] instead. Returns `Ok(false)` when the image
+    /// has no tile (or the renderer cannot update in place); paint a complete
+    /// image instead. `on_complete` runs exactly once, as
+    /// [`PlatformAtlas::update_tile`] describes.
+    pub fn update_image(
+        &mut self,
+        data: &RenderImage,
+        frame_index: usize,
+        region: Bounds<DevicePixels>,
+        update: crate::AtlasTileUpdate<'_>,
+        on_complete: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<bool> {
+        let key: crate::AtlasKey = RenderImageParams {
+            image_id: data.id,
+            frame_index,
+        }
+        .into();
+        self.sprite_atlas
+            .update_tile(&key, region, update, on_complete)
+    }
+
+    /// Allocates the tile of a [`RenderImage::blank`] image without uploading
+    /// its blank pixels. Returns whether the tile is new: its content is
+    /// undefined until [`Self::update_image`] fills all of it. An atlas can drop
+    /// tiles (a lost GPU), so call this before each round of updates.
+    pub fn insert_blank_image(&mut self, data: &RenderImage, frame_index: usize) -> Result<bool> {
+        let key: crate::AtlasKey = RenderImageParams {
+            image_id: data.id,
+            frame_index,
+        }
+        .into();
+        match self.sprite_atlas.insert_blank(&key, data.size(frame_index))? {
+            Some(created) => Ok(created),
+            // Upload the blank pixels instead.
+            None => {
+                let size = data.size(frame_index);
+                let bytes = data
+                    .as_bytes(frame_index)
+                    .ok_or_else(|| anyhow!("image has no frame {frame_index}"))?;
+                let mut created = false;
+                self.sprite_atlas.get_or_insert_with(&key, &mut || {
+                    created = true;
+                    Ok(Some((size, Cow::Borrowed(bytes))))
+                })?;
+                Ok(created)
+            }
+        }
+    }
+
+    /// The GPU this window renders on and the dma-bufs it can import.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub fn dmabuf_target(&self) -> Option<crate::DmabufTarget> {
+        self.sprite_atlas.dmabuf_target()
+    }
+
+    /// Imports a dma-buf for [`crate::AtlasTileUpdate::Dmabuf`] updates of this
+    /// window's images, until the returned import is dropped.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub fn import_dmabuf(&self, dmabuf: &crate::Dmabuf<'_>) -> Result<crate::DmabufImport> {
+        self.sprite_atlas.import_dmabuf(dmabuf)
     }
 
     /// Add a node to the layout tree for the current frame. Takes the `Style` of the element for which
